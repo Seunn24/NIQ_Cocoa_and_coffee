@@ -1,146 +1,136 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
 
-# First loading the extracted dataset belonging to coffee and cocoa
+st.set_page_config(
+    page_title="🌱 Cocoa & Coffee Dashboard",
+    layout="wide",
+)
+st.title("🌱 Cocoa & Coffee Products Dashboard")
+
 @st.cache_data
-def load_data(path):
+def load_data(path: str) -> pd.DataFrame:
     return pd.read_excel(path)
 
 df = load_data('NIQ_coffee_cocoa.xlsx')
 
+# ──────────────────────────────────────────────────────────────────────────────
+# CLEAN & PREP
+# ──────────────────────────────────────────────────────────────────────────────
+df['commodity_code'] = df['commodity_code'].astype(str).str.strip()
 
-# Cleaning the textual feilds 
-df['description_clean'] = df['Description'].astype(str).str.lower()
-df['ingredients_clean'] = df['Ingredients'].astype(str).str.lower()
+commodities = ["0901","1801 00","1803 00","1804 00","1805 10","1806"]
 
-
-commodity_mapping = {
-    # Coffee
-    "instant coffee": "210112",
-    "coffee extract": "210112",
-    "coffee":         "0901",
-    # Cocoa
-    "cocoa beans":  "180100",
-    "cocoa paste":  "180300",
-    "cocoa mass":   "180300",
-    "cocoa butter": "180400",
-    "cocoa powder": "180510",
-    "chocolate":    "1806",
-}
-
-def assign_code(text, mapping):
-    for kw, code in mapping.items():
-        if kw in text:
-            return code
-    return None
-
-# FLAG BY NAME, AND USE THE EXISTING commodity_code AS "INGREDIENT-BASED"
-df['code_by_name']       = df['description_clean'].apply(lambda t: assign_code(t, commodity_mapping))
-df['code_by_ingredient'] = df['commodity_code']  # this is already in my extracted file
-
-
-# BUILD STORY 1 & STORY 2 SUMMARIES
-story1 = df[df['code_by_name'].notna()]
-story2 = df[df['code_by_ingredient'].notna()]
-
-story1_summary = (
-    story1
-    .pivot_table(index='code_by_name',
-                 columns='Subscriber Code',
-                 aggfunc='size',
-                 fill_value=0)
-    .reset_index()
+df['commodity_code'] = pd.Categorical(
+    df['commodity_code'],
+    categories=commodities,
+    ordered=True,
 )
 
-story2_summary = (
-    story2
-    .pivot_table(index='code_by_ingredient',
-                 columns='Subscriber Code',
-                 aggfunc='size',
-                 fill_value=0)
-    .reset_index()
+coffee_codes = df[df['commodity_code']=="0901"]['Subscriber Code'].unique().tolist()
+cocoa_codes = df[df['commodity_code']=="1806"]['Subscriber Code'].unique().tolist()
+own_label_codes = coffee_codes + cocoa_codes
+
+df['label_type'] = np.where(
+    df['Subscriber Code'].isin(own_label_codes),
+    'Own-label',
+    'Branded'
 )
 
-soy_kw    = ['soy', 'soya', 'soybean']
-rubber_kw = ['rubber']
-
-df['contains_soy']    = df['ingredients_clean'].apply(lambda t: any(k in t for k in soy_kw))
-df['contains_rubber'] = df['ingredients_clean'].apply(lambda t: any(k in t for k in rubber_kw))
-
-
-# STREAMLIT UI
-st.title("EUDR Exposure Dashboard (Coffee & Cocoa)")
-
-# Sidebar filters
-subs = st.sidebar.multiselect(
-    "Subscriber Code",
-    options=df['Subscriber Code'].unique(),
-    default=df['Subscriber Code'].unique()
+df['scope'] = np.where(
+    df['commodity_code'].notna(),
+    'In scope',
+    'Not in scope'
 )
 
-valid_subs = [sub for sub in subs if sub in df['Subscriber Code'].values]
+df['ingredients_clean'] = (
+    df['Ingredients'].fillna('').astype(str).str.lower()
+)
+df['potential'] = df['ingredients_clean'].str.contains('coffee|cocoa', na=False)
 
-if not valid_subs:
-    st.sidebar.warning("No valid Subscriber Codes selected.")
-
-story = st.sidebar.radio(
-    "Select Story",
-    ["1. Name-based Exposure",
-     "2. Ingredient-based Exposure",
-     "3. Additional Flags"]
+df['scope2'] = np.where(
+    df['commodity_code'].notna(),
+    'In-scope',
+    np.where(df['potential'],
+             'Potentially-in-scope',
+             'Out-of-scope')
 )
 
-# Apply filter to the main dataframe
-df_filtered = df[df['Subscriber Code'].isin(valid_subs)]
-
-# Rebuild story summaries based on the filtered dataset
-story1 = df_filtered[df_filtered['code_by_name'].notna()]
-story2 = df_filtered[df_filtered['code_by_ingredient'].notna()]
-
-story1_summary = (
-    story1
-    .pivot_table(index='code_by_name',
-                 columns='Subscriber Code',
-                 aggfunc='size',
-                 fill_value=0)
-    .reset_index()
+# ──────────────────────────────────────────────────────────────────────────────
+# CHART 1 – TREEMAP: Scope - Label-Type
+# ──────────────────────────────────────────────────────────────────────────────
+treemap_df = (
+    df.groupby(['scope','label_type'])
+      .size()
+      .reset_index(name='count')
 )
-
-story2_summary = (
-    story2
-    .pivot_table(index='code_by_ingredient',
-                 columns='Subscriber Code',
-                 aggfunc='size',
-                 fill_value=0)
-    .reset_index()
+fig1 = px.treemap(
+    treemap_df,
+    path=['scope','label_type'],
+    values='count',
+    title='Overall Scope & Label-Type Breakdown'
 )
+st.plotly_chart(fig1, use_container_width=True)
 
-# Handle filtering of the summary based on the valid Subscriber Codes
-if story == "1. Name-based Exposure":
-    st.header("Story 1: In-Scope by Product Name")
-    st.dataframe(story1_summary)
+# ──────────────────────────────────────────────────────────────────────────────
+# CHART 2 – STACKED BAR: Branded vs Own-label by Commodity
+# ──────────────────────────────────────────────────────────────────────────────
+stacked_df = (
+    df[df['scope']=='In scope']
+      .groupby(['label_type','commodity_code'])
+      .size()
+      .reset_index(name='count')
+)
+fig2 = px.bar(
+    stacked_df,
+    x='label_type',
+    y='count',
+    color='commodity_code',
+    title='In-Scope Commodities by Label-Type',
+    barmode='stack',
+)
+st.plotly_chart(fig2, use_container_width=True)
 
-    # Only include valid subscriber codes that exist in the story1_summary columns
-    valid_columns = [col for col in valid_subs if col in story1_summary.columns]
-    
-    # Filter the summary and plot the data
-    story1_summary_filtered = story1_summary[['code_by_name'] + valid_columns]
-    st.bar_chart(story1_summary_filtered.set_index('code_by_name')[valid_columns])
+# ──────────────────────────────────────────────────────────────────────────────
+# CHART 3 – CLUSTER BAR: 7 HS Codes × In-scope vs Potentially-in-scope
+# ──────────────────────────────────────────────────────────────────────────────
+cluster_df = (
+    df[df['commodity_code'].isin(commodities)]
+      .groupby(['commodity_code','scope2'])
+      .size()
+      .reset_index(name='count')
+)
+fig3 = px.bar(
+    cluster_df,
+    x='commodity_code',
+    y='count',
+    color='scope2',
+    category_orders={'commodity_code': commodities},  
+    title='Commodity Scope Status',
+    barmode='group',
+)
+# force discrete axis
+fig3.update_xaxes(type='category')
+st.plotly_chart(fig3, use_container_width=True)
 
-elif story == "2. Ingredient-based Exposure":
-    st.header("Story 2: In-Scope by Ingredients")
-    st.dataframe(story2_summary)
-
-    # Filter for only valid Subscriber Codes in the summary
-    valid_columns = [col for col in valid_subs if col in story2_summary.columns]
-    story2_summary_filtered = story2_summary[['code_by_ingredient'] + valid_columns]
-    st.bar_chart(story2_summary_filtered.set_index('code_by_ingredient')[valid_columns])
-
-else:
-    st.header("Additional Flags")
-    flags = df_filtered[['contains_soy', 'contains_rubber']].sum().rename('Count')
-    st.table(flags)
-
-if st.sidebar.checkbox("Show raw data"):
-    st.subheader("Raw Data")
-    st.dataframe(df_filtered)
+# ──────────────────────────────────────────────────────────────────────────────
+# CHART 4 – STACKED BAR: 7 HS Codes × Branded vs Own-label
+# ──────────────────────────────────────────────────────────────────────────────
+stacked5_df = (
+    df[df['commodity_code'].isin(commodities)]
+      .groupby(['commodity_code','label_type'])
+      .size()
+      .reset_index(name='count')
+)
+fig5 = px.bar(
+    stacked5_df,
+    x='commodity_code',
+    y='count',
+    color='label_type',
+    category_orders={'commodity_code': commodities},
+    title='Commodities by Label-Type',
+    barmode='stack',
+)
+fig5.update_xaxes(type='category')
+st.plotly_chart(fig5, use_container_width=True)
