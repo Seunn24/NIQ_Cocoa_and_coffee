@@ -4,3 +4,4 @@ pandas
 matplotlib
 git-lfs
 openpyxl
+plotly
